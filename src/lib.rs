@@ -190,5 +190,40 @@ mod agency {
         pub fn who_is_the_admin(&self) -> AccountId {
             self.admin
         }
+
+        /// Agent gets his/her access key;
+        /// Permission is required;
+        #[ink(message)]
+        pub fn get_iv(&self, agent_id: AccountId) -> Result<Vec<u8>> {
+            let caller = Self::env().caller();
+            if !self.registered_agents.contains(caller) {
+                return Err(Error::PermissionDenial);
+            }
+            if !self.registered_agents.contains(agent_id) {
+                return Err(Error::NoSuchTarget);
+            }
+
+            Ok(self.registered_agents.get(agent_id).unwrap().secret_handle.iv.to_vec())
+        }
+
+        // todo: write a general getter
+        // todo: write a permission verifier to reduce the boilerplate
+
+        /// Agent gets his/her key;
+        /// Permission is required;
+        #[ink(message)]
+        pub fn get_key(&self, agent_id: AccountId) -> Result<Vec<u8>> {
+            let caller = Self::env().caller();
+            if !self.registered_agents.contains(caller) {
+                return Err(Error::PermissionDenial);
+            }
+            if !self.registered_agents.contains(agent_id) {
+                return Err(Error::NoSuchTarget);
+            }
+
+            Ok(self.registered_agents.get(agent_id).unwrap().secret_handle.key.to_vec())
+        }
+
+
     }
 }
