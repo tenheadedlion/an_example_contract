@@ -8,7 +8,6 @@ mod agency {
     use super::pink;
     use ink_env;
     use ink_env::debug_println;
-
     use ink_prelude::format;
     use ink_prelude::vec;
     use ink_prelude::{
@@ -17,6 +16,7 @@ mod agency {
     };
     use ink_storage::traits::{PackedLayout, SpreadAllocate, SpreadLayout};
     use ink_storage::Mapping;
+    use pink::http_get;
     use pink::PinkEnvironment;
     use scale::{Decode, Encode};
 
@@ -111,17 +111,38 @@ mod agency {
     pub struct Record {
         name: String,
         secret_handle: SecretHandle,
+        report: Report,
+    }
+
+    #[derive(
+        Encode,
+        Decode,
+        Debug,
+        PartialEq,
+        Eq,
+        Clone,
+        SpreadLayout,
+        PackedLayout,
+        SpreadAllocate,
+        Default,
+    )]
+    #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
+    pub struct Report {
+        url: String,
+        archive: Vec<String>,
     }
 
     #[derive(Encode, Decode, Debug, PartialEq, Eq, Copy, Clone)]
     #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
     pub enum Error {
-        PermissionDenial,
+        PermissionDenied,
         NoSuchTarget,
+        NoSuchAgent,
         KeyProblem,
         LinkExists,
         CannotDecrypt,
         CannotEncrypt,
+        RequestFailed,
     }
 
     pub type Result<T> = core::result::Result<T, Error>;
@@ -138,6 +159,7 @@ mod agency {
                     &Record {
                         name: "admin".to_string(),
                         secret_handle: SecretHandle::new(),
+                        report: Report::default(),
                     },
                 );
             })
@@ -150,7 +172,7 @@ mod agency {
         pub fn enroll(&mut self, agent_id: AccountId, agent_name: String) -> Result<()> {
             let caller = Self::env().caller();
             if caller != self.admin {
-                return Err(Error::PermissionDenial);
+                return Err(Error::PermissionDenied);
             }
             // create a rsa key pair for encryption/decryption
             /*
@@ -164,7 +186,8 @@ mod agency {
                 agent_id,
                 &Record {
                     name: agent_name,
-                    secret_handle: SecretHandle::new()
+                    secret_handle: SecretHandle::new(),
+                    report: Report::default(),
                 },
             );
             Ok(())
@@ -177,7 +200,7 @@ mod agency {
         pub fn name_of(&self, agent_id: AccountId) -> Result<String> {
             let caller = Self::env().caller();
             if !self.registered_agents.contains(caller) {
-                return Err(Error::PermissionDenial);
+                return Err(Error::PermissionDenied);
             }
             if !self.registered_agents.contains(agent_id) {
                 return Err(Error::NoSuchTarget);
@@ -192,38 +215,105 @@ mod agency {
         }
 
         /// Agent gets his/her access key;
-        /// Permission is required;
+        /// Permission required;
         #[ink(message)]
         pub fn get_iv(&self, agent_id: AccountId) -> Result<Vec<u8>> {
             let caller = Self::env().caller();
             if !self.registered_agents.contains(caller) {
-                return Err(Error::PermissionDenial);
+                return Err(Error::PermissionDenied);
             }
             if !self.registered_agents.contains(agent_id) {
                 return Err(Error::NoSuchTarget);
             }
 
-            Ok(self.registered_agents.get(agent_id).unwrap().secret_handle.iv.to_vec())
+            Ok(self
+                .registered_agents
+                .get(agent_id)
+                .unwrap()
+                .secret_handle
+                .iv
+                .to_vec())
         }
 
         // todo: write a general getter
         // todo: write a permission verifier to reduce the boilerplate
+        // todo: are we sure we should allow the admin to change agent records?
 
         /// Agent gets his/her key;
-        /// Permission is required;
+        /// Permission required;
         #[ink(message)]
         pub fn get_key(&self, agent_id: AccountId) -> Result<Vec<u8>> {
             let caller = Self::env().caller();
-            if !self.registered_agents.contains(caller) {
-                return Err(Error::PermissionDenial);
-            }
-            if !self.registered_agents.contains(agent_id) {
+            if caller != self.admin || !self.registered_agents.contains(agent_id) {
                 return Err(Error::NoSuchTarget);
             }
 
-            Ok(self.registered_agents.get(agent_id).unwrap().secret_handle.key.to_vec())
+            Ok(self
+                .registered_agents
+                .get(agent_id)
+                .unwrap()
+                .secret_handle
+                .key
+                .to_vec())
         }
 
+        /// Agent updates his/her report URL;
+        /// Permission required;
+        #[ink(message)]
+        pub fn update_report_url(&mut self, url: String) -> Result<()> {
+            let caller = Self::env().caller();
+            if !self.registered_agents.contains(caller) {
+                return Err(Error::NoSuchTarget);
+            }
+            let mut record = self
+                .registered_agents
+                .get(caller)
+                .map(Ok)
+                .unwrap_or(Err(Error::NoSuchAgent))?;
+            record.report.url = url;
+            self.registered_agents.insert(caller, &record);
+            Ok(())
+        }
+        /// Get information from a specific agent;
+        /// Permission required;
+        #[ink(message)]
+        // todo: is returing vector of String Ok?
+        pub fn get_report_from(&self, agent_id: AccountId) -> Result<Vec<String>> {
+            let caller = Self::env().caller();
+            if !self.registered_agents.contains(caller) {
+                return Err(Error::NoSuchTarget);
+            }
+            let mut record = self
+                .registered_agents
+                .get(caller)
+                .map(Ok)
+                .unwrap_or(Err(Error::NoSuchAgent))?;
+            Ok(record.report.archive)
+        }
 
+        /// Fetch report from a specific agent;
+        /// Admin Permission required;
+        #[ink(message)]
+        pub fn fetch_report(&mut self, agent_id: AccountId) -> Result<()> {
+            let caller = Self::env().caller();
+            if caller != self.admin {
+                return Err(Error::PermissionDenied);
+            }
+            // todo: make the get method easy to write
+            let mut record = self
+                .registered_agents
+                .get(caller)
+                .map(Ok)
+                .unwrap_or(Err(Error::NoSuchAgent))?;
+
+            let url = record.report.url;
+            let resposne = http_get!(url);
+            if resposne.status_code != 200 {
+                return Err(Error::RequestFailed);
+            }
+            let body = resposne.body;
+            //todo: handle to body
+            Ok(())
+        }
     }
 }
