@@ -20,6 +20,7 @@ mod agency {
     use pink::PinkEnvironment;
     use scale::{Decode, Encode};
 
+    //use base64::{decode, encode};
     //use rsa::{PublicKey, RsaPrivateKey, RsaPublicKey};
     //use rsa::pkcs8::EncodePrivateKey;
     //use rsa::pkcs8::LineEnding;
@@ -56,17 +57,9 @@ mod agency {
             }
         }
 
-        pub fn encrypt(&self, _offset_bytes: u64, plaintext: Vec<u8>) -> Result<Vec<u8>> {
-            // if offset_bytes % (BLOCK_BYTES as u64) != 0 {
-            //     panic!(
-            //         "Offset must be in multiples of block length of {} bytes",
-            //         BLOCK_BYTES
-            //     );
-            // }
-
+        pub fn encrypt(&self, plaintext: Vec<u8>) -> Result<Vec<u8>> {
             let key = Key::from_slice(&self.key);
             let cipher = Aes256Gcm::new(key);
-            // TODO: increase IV by offset / BLOCK_LEN
             let nonce = Nonce::from_slice(&self.iv); // 96-bits; unique per message
 
             let ciphertext = cipher
@@ -75,17 +68,9 @@ mod agency {
             Ok(ciphertext)
         }
 
-        pub fn decrypt(&self, _offset_bytes: u64, ciphertext: Vec<u8>) -> Result<Vec<u8>> {
-            // if offset_bytes % (BLOCK_BYTES as u64) != 0 {
-            //     panic!(
-            //         "Offset must be in multiples of block length of {} bytes",
-            //         BLOCK_BYTES
-            //     );
-            // }
-
+        pub fn decrypt(&self, ciphertext: Vec<u8>) -> Result<Vec<u8>> {
             let key = Key::from_slice(&self.key);
             let cipher = Aes256Gcm::new(key);
-            // TODO: increase IV by offset / BLOCK_LEN
             let nonce = Nonce::from_slice(&self.iv); // 96-bits; unique per message
 
             let plaintext = cipher
@@ -143,6 +128,8 @@ mod agency {
         CannotDecrypt,
         CannotEncrypt,
         RequestFailed,
+        WrongFormat,
+        DataTransform,
     }
 
     pub type Result<T> = core::result::Result<T, Error>;
@@ -277,7 +264,7 @@ mod agency {
         /// Get information from a specific agent;
         /// Permission required;
         #[ink(message)]
-        // todo: is returing vector of String Ok?
+        // todo: is returing vector of Stri;ng Ok?
         pub fn get_report_from(&self, agent_id: AccountId) -> Result<Vec<String>> {
             let caller = Self::env().caller();
             if !self.registered_agents.contains(caller) {
@@ -312,8 +299,27 @@ mod agency {
                 return Err(Error::RequestFailed);
             }
             let body = resposne.body;
-            //todo: handle to body
+            let (secret_code, info) = Self::parse_report(&body)?;
+            // decrypt the secret_code
+            let secret_code = record.secret_handle.decrypt(secret_code);
+
             Ok(())
+        }
+
+        /// Parse the report source to retrieve secret_code and information;
+        /// Reports must follow this format: `<secret_code>\r\n<content>`;
+        /// to generate a report, echo $report | base64 -w 0
+        /// for now the report protocol is too simple to be realistic,
+        ///     it is merely used for demostration purposes;
+        fn parse_report(src: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
+            let src = &base64::decode(src).map_err(|_| Error::DataTransform)?;
+            let mut i = 0;
+            while !(src[i] == b'\r' && src[i + 1] == b'\n') {
+                i += 1;
+            }
+            let secret = &src[..i];
+            let info = &src[i + 2..];
+            Ok((secret.to_vec(), info.to_vec()))
         }
     }
 }

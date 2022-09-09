@@ -21,6 +21,7 @@ pink-utils = { version = "0.1", default-features = false }
 aes-gcm = { version = "0.9.4" }
 #rsa = { version = "0.6.1", default-features = true }
 #rand = "0.8"
+base64 = { version = "0.13.0", default-features = false, features =["alloc"] }
 
 [lib]
 name = "agency"
