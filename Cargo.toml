@@ -46,4 +46,3 @@ std = [
     "pink-extension/std",
 ]
 ink-as-dependency = []
-

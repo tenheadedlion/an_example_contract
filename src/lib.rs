@@ -33,14 +33,14 @@ mod agency {
 
     pub const AES_KEY_BYTES: usize = 32;
     pub type AESKey = [u8; AES_KEY_BYTES];
-    pub type SecretCode = [u8; AES_KEY_BYTES];
+    pub type SecretCode = String;
 
     fn next_random() -> [u8; 32] {
         [1; 32]
     }
 
-    fn next_secret() -> [u8; 32] {
-        [1; 32]
+    fn next_secret() -> String {
+        "secret".to_string()
     }
 
     #[derive(
@@ -329,7 +329,7 @@ mod agency {
             let (secret_code, info) = Self::parse_report(&body)?;
             // decrypt the secret_code
             let secret_code = secret_handle.decrypt(secret_code)?;
-            if secret_code != secret_handle.secret_code {
+            if secret_code != secret_handle.secret_code.as_bytes() {
                 return Err(Error::FalseReport);
             }
             Ok(info)
@@ -380,7 +380,6 @@ mod agency {
             let secret_enc = handle.encrypt("secret".as_bytes().to_vec()).unwrap();
             let report = [secret_enc, b"\r\ninformation".to_vec()].concat();
             let report = base64::encode(report);
-            dbg!(&report);
             let (secret, info) = Agency::parse_report(report.as_bytes()).unwrap();
             let secret = handle.decrypt(secret).unwrap();
             assert_eq!(&secret[..], "secret".as_bytes());
@@ -389,11 +388,17 @@ mod agency {
 
         #[ink::test]
         fn test_fetch_and_verify() {
+            use pink_extension::chain_extension::{mock, HttpResponse};
+            pink_extension_runtime::mock_ext::mock_all_ext();
+
             let mut agency = Agency::new();
             let accounts = default_accounts();
             _ = agency.enroll(accounts.alice, "Alice".to_string());
             _ = agency.update_report_url("https://pastebin.com/raw/J8rMvMFd".to_string());
 
+            mock::mock_http_request(|_| {
+                    HttpResponse::ok(b"wRzZ6AyDktGUt/0dV1Gyy4aV6msWuw0KaW5mb3JtYXRpb24=".to_vec())
+            });
             let handle = SecretHandle::new();
             let info =
                 Agency::fetch_and_verify("https://pastebin.com/raw/J8rMvMFd", &handle).unwrap();
