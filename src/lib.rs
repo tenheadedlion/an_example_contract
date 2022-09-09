@@ -33,8 +33,13 @@ mod agency {
 
     pub const AES_KEY_BYTES: usize = 32;
     pub type AESKey = [u8; AES_KEY_BYTES];
+    pub type SecretCode = [u8; AES_KEY_BYTES];
 
     fn next_random() -> [u8; 32] {
+        [1; 32]
+    }
+
+    fn next_secret() -> [u8; 32] {
         [1; 32]
     }
 
@@ -45,6 +50,7 @@ mod agency {
     pub struct SecretHandle {
         key: AESKey,
         iv: IV,
+        secret_code: SecretCode,
     }
 
     impl SecretHandle {
@@ -54,9 +60,11 @@ mod agency {
                 iv: next_random()[..IV_BYTES]
                     .try_into()
                     .expect("should not fail with valid length; qed."),
+                secret_code: next_secret(),
             }
         }
 
+        #[allow(dead_code)]
         pub fn encrypt(&self, plaintext: Vec<u8>) -> Result<Vec<u8>> {
             let key = Key::from_slice(&self.key);
             let cipher = Aes256Gcm::new(key);
@@ -130,10 +138,10 @@ mod agency {
         RequestFailed,
         WrongFormat,
         DataTransform,
+        FalseReport,
     }
 
     pub type Result<T> = core::result::Result<T, Error>;
-    const KEYBITS: usize = 2048;
 
     impl Agency {
         #[ink(constructor)]
@@ -270,9 +278,9 @@ mod agency {
             if !self.registered_agents.contains(caller) {
                 return Err(Error::NoSuchTarget);
             }
-            let mut record = self
+            let record = self
                 .registered_agents
-                .get(caller)
+                .get(agent_id)
                 .map(Ok)
                 .unwrap_or(Err(Error::NoSuchAgent))?;
             Ok(record.report.archive)
@@ -292,8 +300,27 @@ mod agency {
                 .get(caller)
                 .map(Ok)
                 .unwrap_or(Err(Error::NoSuchAgent))?;
+            let info = Self::fetch_and_verify(&record.report.url, &record.secret_handle)?;
+            record
+                .report
+                .archive
+                .push(String::from_utf8_lossy(&info).to_string());
+            self.registered_agents.insert(agent_id, &record);
+            Ok(())
+        }
 
-            let url = record.report.url;
+        #[ink(message)]
+        pub fn attest(&self, url: String) -> Result<Vec<u8>> {
+            let caller = Self::env().caller();
+            let record = self
+                .registered_agents
+                .get(caller)
+                .map(Ok)
+                .unwrap_or(Err(Error::NoSuchAgent))?;
+            Self::fetch_and_verify(&url, &record.secret_handle)
+        }
+
+        pub fn fetch_and_verify(url: &str, secret_handle: &SecretHandle) -> Result<Vec<u8>> {
             let resposne = http_get!(url);
             if resposne.status_code != 200 {
                 return Err(Error::RequestFailed);
@@ -301,9 +328,11 @@ mod agency {
             let body = resposne.body;
             let (secret_code, info) = Self::parse_report(&body)?;
             // decrypt the secret_code
-            let secret_code = record.secret_handle.decrypt(secret_code);
-
-            Ok(())
+            let secret_code = secret_handle.decrypt(secret_code)?;
+            if secret_code != secret_handle.secret_code {
+                return Err(Error::FalseReport);
+            }
+            Ok(info)
         }
 
         /// Parse the report source to retrieve secret_code and information;
@@ -311,7 +340,7 @@ mod agency {
         /// to generate a report, echo $report | base64 -w 0
         /// for now the report protocol is too simple to be realistic,
         ///     it is merely used for demostration purposes;
-        fn parse_report(src: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
+        pub fn parse_report(src: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
             let src = &base64::decode(src).map_err(|_| Error::DataTransform)?;
             let mut i = 0;
             while !(src[i] == b'\r' && src[i + 1] == b'\n') {
@@ -320,6 +349,55 @@ mod agency {
             let secret = &src[..i];
             let info = &src[i + 2..];
             Ok((secret.to_vec(), info.to_vec()))
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use ink_lang as ink;
+
+        fn default_accounts() -> ink_env::test::DefaultAccounts<PinkEnvironment> {
+            ink_env::test::default_accounts::<Environment>()
+        }
+
+        #[ink::test]
+        fn test_secret_hanle() {
+            let plaintext = "hello world";
+            let handle = SecretHandle::new();
+            let encrypted = handle.encrypt(plaintext.as_bytes().to_vec()).unwrap();
+            let decrypted = handle.decrypt(encrypted).unwrap();
+            assert_eq!(plaintext.as_bytes(), &decrypted[..]);
+        }
+
+        #[ink::test]
+        fn test_parse_report() {
+            let (secret, info) = Agency::parse_report(b"c2VjcmV0DQppbmZvcm1hdGlvbgo=").unwrap();
+            assert_eq!(&secret[..], "secret".as_bytes());
+            assert_eq!(&info[..], "information\n".as_bytes());
+
+            let handle = SecretHandle::new();
+            let secret_enc = handle.encrypt("secret".as_bytes().to_vec()).unwrap();
+            let report = [secret_enc, b"\r\ninformation".to_vec()].concat();
+            let report = base64::encode(report);
+            dbg!(&report);
+            let (secret, info) = Agency::parse_report(report.as_bytes()).unwrap();
+            let secret = handle.decrypt(secret).unwrap();
+            assert_eq!(&secret[..], "secret".as_bytes());
+            assert_eq!(&info[..], "information".as_bytes());
+        }
+
+        #[ink::test]
+        fn test_fetch_and_verify() {
+            let mut agency = Agency::new();
+            let accounts = default_accounts();
+            _ = agency.enroll(accounts.alice, "Alice".to_string());
+            _ = agency.update_report_url("https://pastebin.com/raw/J8rMvMFd".to_string());
+
+            let handle = SecretHandle::new();
+            let info =
+                Agency::fetch_and_verify("https://pastebin.com/raw/J8rMvMFd", &handle).unwrap();
+            assert_eq!("information".as_bytes(), &info[..]);
         }
     }
 }
