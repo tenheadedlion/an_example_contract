@@ -6,10 +6,6 @@ use pink_extension as pink;
 mod agency {
 
     use super::pink;
-    use ink_env;
-    use ink_env::debug_println;
-    use ink_prelude::format;
-    use ink_prelude::vec;
     use ink_prelude::{
         string::{String, ToString},
         vec::Vec,
@@ -95,6 +91,13 @@ mod agency {
         name: String,
         admin: AccountId,
         registered_agents: Mapping<AccountId, Record>,
+        // agency's vault of gold:
+        // we assume the agency has unlimited amount of money, 
+        //  so as not to bother with balance calculation;
+        //  the agency regularly pays(lazily) the agents salary,
+        //   but the agents must claim it themselves.
+        //  the agency also pays those who sell information;
+        balance: Mapping<AccountId, u32>,
     }
 
     #[derive(
@@ -129,7 +132,6 @@ mod agency {
     #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
     pub enum Error {
         PermissionDenied,
-        NoSuchTarget,
         NoSuchAgent,
         KeyProblem,
         LinkExists,
@@ -139,6 +141,7 @@ mod agency {
         WrongFormat,
         DataTransform,
         FalseReport,
+        InsufficientGold,
     }
 
     pub type Result<T> = core::result::Result<T, Error>;
@@ -188,6 +191,44 @@ mod agency {
             Ok(())
         }
 
+        /// Earn some coins by providing information;
+        /// input: information;
+        /// No permission is required;
+        /// Agents can't take part in this;
+        /// 1 coin for each infomation;
+        #[ink(message)]
+        pub fn sell_information(&mut self, _str: String) -> Result<()> {
+            // todo: add some logic to process the information
+            // for now, we just give everybody money as long as he calls this method
+            let caller = Self::env().caller();
+            if self.registered_agents.contains(caller) {
+                return Err(Error::PermissionDenied);
+            }
+            let mut personal_balance = self.balance.get(caller).unwrap_or(0);
+            personal_balance += 10;
+            self.balance.insert(caller, &personal_balance);
+            Ok(())
+        }
+
+        /// Give the agency a sum of money, and you will become an agent;
+        /// input your name;
+        /// Agents can't take part in this;
+        /// 3 coins to buy you in;
+        #[ink(message)]
+        pub fn buy_yourself_a_position(&mut self, name: String) -> Result<String> {
+            let caller = Self::env().caller();
+            if self.registered_agents.contains(caller) {
+                return Err(Error::PermissionDenied);
+            }
+            let personal_balance = self.balance.get(caller).unwrap_or(0);
+            if personal_balance < 2 {
+                return Err(Error::InsufficientGold);
+            }
+            self.balance.remove(caller);
+            _ = self.enroll(caller, name);
+            Ok("You are in!".to_string())
+        }
+
         /// Get the name of a colleague;
         ///
         /// The caller must be a member of the agency
@@ -198,54 +239,53 @@ mod agency {
                 return Err(Error::PermissionDenied);
             }
             if !self.registered_agents.contains(agent_id) {
-                return Err(Error::NoSuchTarget);
+                return Err(Error::NoSuchAgent);
             }
 
             Ok(self.registered_agents.get(agent_id).unwrap().name)
         }
 
+        /// Who's the boss? Members permission is require;
         #[ink(message)]
-        pub fn who_is_the_admin(&self) -> AccountId {
-            self.admin
-        }
-
-        /// Agent gets his/her access key;
-        /// Permission required;
-        #[ink(message)]
-        pub fn get_iv(&self, agent_id: AccountId) -> Result<Vec<u8>> {
+        pub fn who_is_the_admin(&self) -> Result<AccountId> {
             let caller = Self::env().caller();
             if !self.registered_agents.contains(caller) {
                 return Err(Error::PermissionDenied);
             }
-            if !self.registered_agents.contains(agent_id) {
-                return Err(Error::NoSuchTarget);
+            Ok(self.admin)
+        }
+
+        /// Agent gets his/her own access key;
+        /// Permission is required;
+        #[ink(message)]
+        pub fn get_access_key(&self) -> Result<Vec<u8>> {
+            let caller = Self::env().caller();
+            if !self.registered_agents.contains(caller) {
+                return Err(Error::PermissionDenied);
             }
 
             Ok(self
                 .registered_agents
-                .get(agent_id)
+                .get(caller)
                 .unwrap()
                 .secret_handle
                 .iv
                 .to_vec())
         }
 
-        // todo: write a general getter
-        // todo: write a permission verifier to reduce the boilerplate
-        // todo: are we sure we should allow the admin to change agent records?
-
-        /// Agent gets his/her key;
+        /// Agent gets his/her own secret key;
         /// Permission required;
         #[ink(message)]
-        pub fn get_key(&self, agent_id: AccountId) -> Result<Vec<u8>> {
+        pub fn get_secret_key(&self) -> Result<Vec<u8>> {
             let caller = Self::env().caller();
-            if caller != self.admin || !self.registered_agents.contains(agent_id) {
-                return Err(Error::NoSuchTarget);
+
+            if !self.registered_agents.contains(caller) {
+                return Err(Error::PermissionDenied);
             }
 
             Ok(self
                 .registered_agents
-                .get(agent_id)
+                .get(caller)
                 .unwrap()
                 .secret_handle
                 .key
@@ -258,7 +298,7 @@ mod agency {
         pub fn update_report_url(&mut self, url: String) -> Result<()> {
             let caller = Self::env().caller();
             if !self.registered_agents.contains(caller) {
-                return Err(Error::NoSuchTarget);
+                return Err(Error::NoSuchAgent);
             }
             let mut record = self
                 .registered_agents
@@ -272,11 +312,10 @@ mod agency {
         /// Get information from a specific agent;
         /// Permission required;
         #[ink(message)]
-        // todo: is returing vector of Stri;ng Ok?
         pub fn get_report_from(&self, agent_id: AccountId) -> Result<Vec<String>> {
             let caller = Self::env().caller();
             if !self.registered_agents.contains(caller) {
-                return Err(Error::NoSuchTarget);
+                return Err(Error::NoSuchAgent);
             }
             let record = self
                 .registered_agents
@@ -309,6 +348,7 @@ mod agency {
             Ok(())
         }
 
+        /// Input a URL with legitimate report content
         #[ink(message)]
         pub fn attest(&self, url: String) -> Result<Vec<u8>> {
             let caller = Self::env().caller();
@@ -397,7 +437,7 @@ mod agency {
             _ = agency.update_report_url("https://pastebin.com/raw/J8rMvMFd".to_string());
 
             mock::mock_http_request(|_| {
-                    HttpResponse::ok(b"wRzZ6AyDktGUt/0dV1Gyy4aV6msWuw0KaW5mb3JtYXRpb24=".to_vec())
+                HttpResponse::ok(b"wRzZ6AyDktGUt/0dV1Gyy4aV6msWuw0KaW5mb3JtYXRpb24=".to_vec())
             });
             let handle = SecretHandle::new();
             let info =
